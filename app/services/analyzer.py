@@ -4,107 +4,123 @@ import logging
 from openai import OpenAI
 
 from app.core.config import get_settings
-from app.models.schemas import CallAnalysis, CallType, ManagerScore, TranscriptionResult, ProcessedCall
+from app.models.schemas import (
+    CallAnalysis, CallType, CallResult,
+    TranscriptionResult, ProcessedCall
+)
 
 logger = logging.getLogger(__name__)
 
 ALLOWED_WORK_TYPES = [
-    "Комп'ютерна діагностика",
-    "Заміна оливи ДВЗ + масляний фільтр",
-    "Комплексна діагностика",
-    "Ендоскопія",
-    "Заміна повітряного фільтра ДВЗ",
-    "Заміна фільтра салону в салоновому відділенні",
-    "Заміна сайлентблоку",
-    "Зняття / встановлення важків",
-    "Заміна пластичної муфти карданного валу",
-    "Слюсарні роботи",
-    "Діагностична підвіска (НЕ ВИКОРИСТОВУЄМО/ВИКОРИСТОВУЄМО КОМПЛЕКСНО)",
-    "Зняття / встановлення важків пр.",
-    "Заміна амортизатора переднього",
-    "Заміна оливи АКПП",
-    "Мийка / чистка деталей",
-    "Зняття / встановлення випускного патрубка",
-    "Заміна охолоджувальної рідини",
-    "Заміна гальмівної рідини з прокачкою",
-    "Заміна оливи в зд. редуктор",
-    "Кодування опцій",
-    "Заміна амортизатора зд.",
-    "Заміна гальмівних дисків та колодок пр.",
-    "Інше",
+    "Комп'ютерна діагностика", "Заміна оливи ДВЗ + масляний фільтр",
+    "Комплексна діагностика", "Комплексне ТО", "Ендоскопія",
+    "Заміна повітряного фільтра ДВЗ", "Заміна фільтра салону",
+    "Заміна сайлентблоку", "Зняття / встановлення деталі",
+    "Заміна пластичної муфти карданного валу", "Слюсарні роботи",
+    "Заміна амортизатора переднього", "Заміна амортизатора заднього",
+    "Заміна оливи АКПП", "Мийка / чистка деталей",
+    "Заміна охолоджувальної рідини", "Заміна гальмівної рідини",
+    "Заміна оливи в зд. редуктор", "Кодування опцій",
+    "Заміна гальмівних дисків та колодок", "Заміна свічок запалення",
+    "Заміна ланцюгів ГРМ", "Заміна приводного ременя",
+    "Заміна помпи", "Заміна прокладки маслостакана",
+    "Інший варіант",
 ]
 
-RESPONSE_SCHEMA = """
-{
-  "call_type": "client" | "internal" | "other",
-  "work_type": "<одне значення з дозволеного списку, або 'Інше'>",
-  "is_ok": true | false,
-  "issues": ["<проблема 1>", "<проблема 2>"],
-  "comment": "<детальний коментар для таблиці>",
-  "score": 1 | 0
-}
-"""
+SYSTEM_PROMPT = f"""Ти — аналітик з контролю якості для автосервісу.
+Проаналізуй транскрибацію дзвінка та поверни ТІЛЬКИ JSON-об'єкт — без markdown розмітки та пояснень.
 
-SYSTEM_PROMPT = f"""Ти — асистент з контролю якості для автосервісу.
-Твоє завдання — аналізувати транскрибації розмов між менеджерами та клієнтами (або внутрішні дзвінки).
+Оціни кожен критерій та поверни 1 (так/добре) або 0 (ні/погано):
 
-Обов'язки:
-1. Визнач тип дзвінка: "client" (менеджер + клієнт), "internal" (між персоналом) або "other".
-2. Визнач тип обговорюваних робіт. Вибирай ТІЛЬКИ з цього списку:
+КРИТЕРІЇ:
+1. greeting_ok — Чи привітався менеджер на початку розмови? (1=так, 0=ні)
+2. asked_body — Чи запитав менеджер про тип кузова авто? (1=так, 0=ні)
+3. asked_year — Чи запитав менеджер про рік випуску авто? (1=так, 0=ні)
+4. asked_mileage — Чи запитав менеджер про пробіг? (1=так, 0=ні)
+5. offered_diagnostics — Чи запропонував менеджер комплексну діагностику? (1=так, 0=ні)
+6. asked_previous_work — Чи запитав менеджер, які роботи проводилися раніше? (1=так, 0=ні)
+7. goodbye_ok — Чи попрощався менеджер належним чином наприкінці розмови? (1=так, 0=ні)
+8. followed_top100 — Чи дотримався менеджер усіх інструкцій для визначеного типу робіт із топ-100? (1=так, 0=ні)
+
+ТИПИ РОБІТ (вибери найближчий варіант або "Інший варіант"):
 {chr(10).join(f'- {w}' for w in ALLOWED_WORK_TYPES)}
-   Якщо жоден тип роботи не підходить, використовуй "Інше".
-3. Оціни роботу менеджера:
-   - is_ok = true  → менеджер відповів правильно, був ввічливим, задовольнив потреби клієнта.
-   - is_ok = false → менеджер поводився грубо, ігнорував клієнта, надав невірну інформацію або не допоміг.
-4. Перерахуй конкретні проблеми, якщо is_ok = false. Якщо is_ok = true, залиш список порожнім [].
-5. Напиши детальний коментар для Google Таблиці. Якщо is_ok = false, чітко поясни, що пішло не так.
-6. Постав оцінку: 1, якщо is_ok = true, або 0, якщо is_ok = false.
 
-КРИТИЧНІ ПРАВИЛА:
-- Відповідай ТІЛЬКИ у форматі valid JSON. Без вступних слів, без розмітки markdown, без пояснень поза межами JSON.
-- Дотримуйся саме цієї схеми:
-{RESPONSE_SCHEMA}
-- work_type повинен точно збігатися з одним із значень зі списку дозволених.
-- score має бути строго цілим числом 1 або 0 (integer).
-"""
+ТИПИ ДЗВІНКІВ (call_type):
+- "Авто в роботі" — клієнт телефонує щодо авто, яке вже на сервісі
+- "Вхідний дзвінок" — загальний вхідний дзвінок
+- "Запис на сервіс" — запис на обслуговування
+- "Консультація" — дзвінок для отримання консультації
+- "Інше" — інше
+
+РЕЗУЛЬТАТИ (result):
+- "Передзвонити" — потрібно перетелефонувати
+- "Запис" — записано
+- "Запис на сервіс" — записано на сервіс
+- "Повторно консультація" — повторна консультація
+- "Передано іншому філіалу" — передано до іншої філії
+- "Інше" — інше
+
+ЗАПЧАСТИНИ (parts_source):
+- "Наші" — запчастини автосервісу
+- "Клієнта" — власні запчастини клієнта
+- "" — не обговорювалося
+
+Поверни ТОЧНО таку JSON-схему:
+{{
+  "call_type": "<один із типів дзвінків>",
+  "greeting_ok": 0 або 1,
+  "asked_body": 0 або 1,
+  "asked_year": 0 або 1,
+  "asked_mileage": 0 або 1,
+  "offered_diagnostics": 0 або 1,
+  "asked_previous_work": 0 або 1,
+  "booked_date": "<рядок з датою або null>",
+  "goodbye_ok": 0 або 1,
+  "work_type": "<тип роботи зі списку>",
+  "followed_top100": 0 або 1,
+  "top100_violations": "<які інструкції не були виконані, або порожній рядок>",
+  "result": "<один із варіантів результату>",
+  "parts_source": "<Наші / Клієнта / порожній рядок>",
+  "comment": "<детальний коментар, виділіть проблеми, якщо вони є>"
+}}"""
 
 
 def _get_client() -> OpenAI:
     return OpenAI(api_key=get_settings().openai_api_key)
 
 
-def _build_user_message(transcript: str, filename: str) -> str:
-    return (
-        f"Аудіофайл: {filename}\n\n"
-        f"Транскрибація:\n{transcript}"
-    )
-
-
-def _parse_response(raw: str, filename: str) -> CallAnalysis:
+def _parse(raw: str, filename: str) -> CallAnalysis:
     cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError as e:
-        raise ValueError(f"LLM повернула некоректний JSON для файлу {filename}: {e}\nОригінал: {raw}")
+        raise ValueError(f"Некоректний JSON від LLM для файлу {filename}: {e}\nОригінал: {raw}")
 
     try:
         return CallAnalysis(
             call_type=CallType(data["call_type"]),
+            greeting_ok=int(data["greeting_ok"]),
+            asked_body=int(data["asked_body"]),
+            asked_year=int(data["asked_year"]),
+            asked_mileage=int(data["asked_mileage"]),
+            offered_diagnostics=int(data["offered_diagnostics"]),
+            asked_previous_work=int(data["asked_previous_work"]),
+            booked_date=data.get("booked_date") or None,
+            goodbye_ok=int(data["goodbye_ok"]),
             work_type=data["work_type"],
-            is_ok=bool(data["is_ok"]),
-            issues=data.get("issues", []),
+            followed_top100=int(data["followed_top100"]),
+            top100_violations=data.get("top100_violations", ""),
+            result=CallResult(data["result"]),
+            parts_source=data.get("parts_source", ""),
             comment=data["comment"],
-            score=ManagerScore(int(data["score"])),
         )
     except (KeyError, ValueError) as e:
-        raise ValueError(f"Відповідь LLM не відповідає схемі для файлу {filename}: {e}\nДані: {data}")
+        raise ValueError(f"Невідповідність схемі для файлу {filename}: {e}\nДані: {data}")
 
 
 def analyze(transcription: TranscriptionResult) -> ProcessedCall:
     settings = get_settings()
     client = _get_client()
-
     logger.info(f"Аналіз файлу: {transcription.audio_filename}")
 
     response = client.chat.completions.create(
@@ -113,42 +129,29 @@ def analyze(transcription: TranscriptionResult) -> ProcessedCall:
         max_tokens=settings.llm_max_tokens,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": _build_user_message(
-                    transcription.transcript,
-                    transcription.audio_filename,
-                ),
-            },
+            {"role": "user", "content": (
+                f"Файл: {transcription.audio_filename}\n\n"
+                f"Транскрибація:\n{transcription.transcript}"
+            )},
         ],
     )
 
     raw = response.choices[0].message.content or ""
-    analysis = _parse_response(raw, transcription.audio_filename)
+    analysis = _parse(raw, transcription.audio_filename)
 
     logger.info(
-        f"Оброблено файл {transcription.audio_filename}: "
-        f"call_type={analysis.call_type.value}, "
-        f"work_type={analysis.work_type}, "
-        f"score={analysis.score.value}"
+        f"Завершено обробку {transcription.audio_filename}: "
+        f"оцінка={ProcessedCall(transcription=transcription, analysis=analysis).score()}/8"
     )
-
-    return ProcessedCall(
-        transcription=transcription,
-        analysis=analysis,
-    )
+    return ProcessedCall(transcription=transcription, analysis=analysis)
 
 
 def analyze_all(transcriptions: list[TranscriptionResult]) -> list[ProcessedCall]:
     results = []
-
     for t in transcriptions:
         try:
-            result = analyze(t)
-            results.append(result)
+            results.append(analyze(t))
         except Exception as e:
             logger.error(f"Помилка аналізу файлу {t.audio_filename}: {e}")
-            continue
-
-    logger.info(f"Успішно проаналізовано {len(results)} з {len(transcriptions)} файлів.")
+    logger.info(f"Проаналізовано {len(results)} з {len(transcriptions)} файлів.")
     return results
