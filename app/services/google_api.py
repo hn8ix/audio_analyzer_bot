@@ -39,7 +39,6 @@ SHEET_HEADERS = [
     "Результат", "Оцінка", "Запчастини", "Коментар",
 ]
 
-
 def _creds() -> Credentials:
     return Credentials.from_service_account_file(
         get_settings().google_service_account_path, scopes=SCOPES
@@ -50,7 +49,6 @@ def _drive():
 
 def _sheets():
     return build("sheets", "v4", credentials=_creds(), cache_discovery=False)
-
 
 def list_audio_files(folder_id: str) -> list[dict]:
     drive = _drive()
@@ -69,7 +67,6 @@ def list_audio_files(folder_id: str) -> list[dict]:
     logger.info(f"Знайдено {len(results)} аудіофайл(ів)")
     return results
 
-
 def download_file(file_id: str, filename: str, local_dir: str) -> str:
     local_path = str(Path(local_dir) / filename)
     os.makedirs(local_dir, exist_ok=True)
@@ -82,27 +79,32 @@ def download_file(file_id: str, filename: str, local_dir: str) -> str:
     logger.info(f"Завантажено: {filename}")
     return local_path
 
-
 def download_all_audio(folder_id: str, local_dir: str) -> list[tuple[str, str]]:
     files = list_audio_files(folder_id)
     return [(download_file(f["id"], f["name"], local_dir), f["name"]) for f in files]
 
-
 def copy_to_work_folder(file_id: str, filename: str, work_folder_id: str) -> str:
-    copied = _drive().files().copy(
-        fileId=file_id,
-        body={"name": filename, "parents": [work_folder_id]}
-    ).execute()
-    logger.info(f"Скопійовано {filename} -> {copied['id']}")
-    return copied["id"]
+    drive = _drive()
+    file = drive.files().get(fileId=file_id, fields="parents").execute()
+    current_parents = ",".join(file.get("parents", []))
 
+    updated = drive.files().update(
+        fileId=file_id,
+        addParents=work_folder_id,
+        removeParents=current_parents,
+        fields="id, parents",
+    ).execute()
+
+    logger.info(f"Переміщено {filename} до робочої папки ({updated['id']})")
+    return updated["id"]
 
 def ensure_headers(sheet_id: str, sheet_name: str) -> None:
     sheets = _sheets()
     result = sheets.spreadsheets().values().get(
         spreadsheetId=sheet_id, range=f"{sheet_name}!A1:T1"
     ).execute()
-    if result.get("values", [[]])[0] == SHEET_HEADERS:
+    existing = result.get("values", [])
+    if existing and existing[0] == SHEET_HEADERS:
         return
     sheets.spreadsheets().values().update(
         spreadsheetId=sheet_id, range=f"{sheet_name}!A1",
@@ -110,13 +112,11 @@ def ensure_headers(sheet_id: str, sheet_name: str) -> None:
     ).execute()
     logger.info("Заголовки записані.")
 
-
 def _next_empty_row(sheets_svc, sheet_id: str, sheet_name: str) -> int:
     result = sheets_svc.spreadsheets().values().get(
         spreadsheetId=sheet_id, range=f"{sheet_name}!A:A"
     ).execute()
     return len(result.get("values", [])) + 1
-
 
 def append_rows(sheet_id: str, sheet_name: str, rows: list[SheetRow]) -> int:
     if not rows:
@@ -142,7 +142,6 @@ def append_rows(sheet_id: str, sheet_name: str, rows: list[SheetRow]) -> int:
     _highlight_bad_rows(sheets, sheet_id, sheet_name, rows, start_row)
     return start_row
 
-
 def _highlight_bad_rows(sheets_svc, sheet_id, sheet_name, rows, start_row):
     meta = sheets_svc.spreadsheets().get(spreadsheetId=sheet_id).execute()
     sheet_gid = next(
@@ -164,7 +163,6 @@ def _highlight_bad_rows(sheets_svc, sheet_id, sheet_name, rows, start_row):
             spreadsheetId=sheet_id, body={"requests": requests}
         ).execute()
         logger.info(f"Виділено {len(requests)} рядок(ів) червоним кольором.")
-
 
 def upload_transcript(txt_path: str, audio_filename: str, work_folder_id: str) -> str:
     from googleapiclient.http import MediaFileUpload
