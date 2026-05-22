@@ -66,7 +66,7 @@ def list_audio_files(folder_id: str) -> list[dict]:
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
-    logger.info(f"Знайдено {len(results)} аудіофайлів")
+    logger.info(f"Знайдено {len(results)} аудіофайл(ів)")
     return results
 
 
@@ -89,20 +89,12 @@ def download_all_audio(folder_id: str, local_dir: str) -> list[tuple[str, str]]:
 
 
 def copy_to_work_folder(file_id: str, filename: str, work_folder_id: str) -> str:
-    drive = _drive()
-
-    file = drive.files().get(fileId=file_id, fields="parents").execute()
-    current_parents = ",".join(file.get("parents", []))
-
-    updated = drive.files().update(
+    copied = _drive().files().copy(
         fileId=file_id,
-        addParents=work_folder_id,
-        removeParents=current_parents,
-        fields="id, parents",
+        body={"name": filename, "parents": [work_folder_id]}
     ).execute()
-
-    logger.info(f"Переміщено {filename} до робочої папки ({updated['id']})")
-    return updated["id"]
+    logger.info(f"Скопійовано {filename} -> {copied['id']}")
+    return copied["id"]
 
 
 def ensure_headers(sheet_id: str, sheet_name: str) -> None:
@@ -145,7 +137,7 @@ def append_rows(sheet_id: str, sheet_name: str, rows: list[SheetRow]) -> int:
         spreadsheetId=sheet_id, range=f"{sheet_name}!A{start_row}",
         valueInputOption="RAW", body={"values": values},
     ).execute()
-    logger.info(f"Записано {len(rows)} рядків, починаючи з рядка {start_row}.")
+    logger.info(f"Записано {len(rows)} рядок(ів), починаючи з {start_row}.")
 
     _highlight_bad_rows(sheets, sheet_id, sheet_name, rows, start_row)
     return start_row
@@ -163,7 +155,7 @@ def _highlight_bad_rows(sheets_svc, sheet_id, sheet_name, rows, start_row):
             idx = start_row - 1 + i
             requests.append({"repeatCell": {
                 "range": {"sheetId": sheet_gid, "startRowIndex": idx,
-                          "endRowIndex": idx + 1, "startColumnIndex": 0, "endColumnIndex": 20},
+                           "endRowIndex": idx + 1, "startColumnIndex": 0, "endColumnIndex": 20},
                 "cell": {"userEnteredFormat": {"backgroundColor": RED_COLOR}},
                 "fields": "userEnteredFormat.backgroundColor",
             }})
@@ -171,4 +163,27 @@ def _highlight_bad_rows(sheets_svc, sheet_id, sheet_name, rows, start_row):
         sheets_svc.spreadsheets().batchUpdate(
             spreadsheetId=sheet_id, body={"requests": requests}
         ).execute()
-        logger.info(f"Виділено червоним {len(requests)} рядків з низькою оцінкою.")
+        logger.info(f"Виділено {len(requests)} рядок(ів) червоним кольором.")
+
+
+def upload_transcript(txt_path: str, audio_filename: str, work_folder_id: str) -> str:
+    from googleapiclient.http import MediaFileUpload
+
+    drive = _drive()
+    txt_filename = Path(txt_path).name
+
+    file_metadata = {
+        "name": txt_filename,
+        "parents": [work_folder_id],
+        "mimeType": "text/plain",
+    }
+    media = MediaFileUpload(txt_path, mimetype="text/plain")
+
+    uploaded = drive.files().create(
+        body=file_metadata,
+        media_body=media,
+        fields="id",
+    ).execute()
+
+    logger.info(f"Транскрипцію завантажено на Drive: {txt_filename} ({uploaded['id']})")
+    return uploaded["id"]
