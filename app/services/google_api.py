@@ -89,12 +89,20 @@ def download_all_audio(folder_id: str, local_dir: str) -> list[tuple[str, str]]:
 
 
 def copy_to_work_folder(file_id: str, filename: str, work_folder_id: str) -> str:
-    copied = _drive().files().copy(
+    drive = _drive()
+
+    file = drive.files().get(fileId=file_id, fields="parents").execute()
+    current_parents = ",".join(file.get("parents", []))
+
+    updated = drive.files().update(
         fileId=file_id,
-        body={"name": filename, "parents": [work_folder_id]}
+        addParents=work_folder_id,
+        removeParents=current_parents,
+        fields="id, parents",
     ).execute()
-    logger.info(f"Скопійовано {filename} -> {copied['id']}")
-    return copied["id"]
+
+    logger.info(f"Переміщено {filename} до робочої папки ({updated['id']})")
+    return updated["id"]
 
 
 def ensure_headers(sheet_id: str, sheet_name: str) -> None:
