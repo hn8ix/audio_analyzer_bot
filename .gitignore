@@ -8,8 +8,8 @@ venv.bak/
 
 __pycache__/
 *.py[cod]
-*$py.class
-
+*$py.class.env
+service_account.json
 
 data/
 *.mp3
